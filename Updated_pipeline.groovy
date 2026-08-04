@@ -1,0 +1,85 @@
+pipeline{
+    agent any
+    tools{
+        jdk 'jdk26'
+        nodejs 'node18'
+    }
+    environment {
+        SCANNER_HOME=tool 'sonar-scanner'
+    }
+    triggers {
+        githubPush()
+    }
+    options {
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
+    }
+    stages {
+        stage('clean workspace'){
+            steps{
+                cleanWs()
+            }
+        }
+        stage('Checkout from Git'){
+            steps{
+                git branch: 'main', url: 'https://github.com/lakshya-chaudhari/DevSecOps-Project.git'
+                }
+        }
+        stage("Sonarqube Analysis "){
+            steps{
+                withSonarQubeEnv('sonar-server') {
+                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=Netflix \
+                    -Dsonar.projectKey=Netflix '''
+                }
+            }
+        }
+        stage("quality gate"){
+           steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            } 
+        }
+        stage('Install Dependencies') {
+            steps {
+                sh "npm install"
+            }
+        }
+        stage('OWASP FS SCAN') {
+            steps {
+                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'DP-Check'
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            }
+        }
+        stage('TRIVY FS SCAN') {
+            steps {
+                sh "trivy fs . > trivyfs.txt"
+            }
+        }
+        stage("Docker Build & Push"){
+            steps{
+                script{
+                   withDockerRegistry(credentialsId: 'docker'){   
+                       sh "docker build --build-arg TMDB_V3_API_KEY=812b12a99b584b1ce5dcc5f69cc33364 --build-arg CACHEBUST=${BUILD_NUMBER} -t netflix ."
+                       sh "docker tag netflix lakshyachaudhari/netflix:latest "
+                       sh "docker push lakshyachaudhari/netflix:latest "
+                    }
+                }
+            }
+        }
+        stage("TRIVY"){
+            steps{
+                sh "trivy image lakshyachaudhari/netflix:latest > trivyimage.txt" 
+            }
+        }
+        stage('Deploy to container'){
+            steps{
+                sh 'docker pull lakshyachaudhari/netflix:latest'
+                sh 'docker stop netflix-app || true'
+                sh 'docker rm netflix-app || true'
+                sh 'docker run -d --name netflix-app -p 8081:80 lakshyachaudhari/netflix:latest'
+                sh 'docker pull lakshyachaudhari/netflix:latest'
+            }
+        }
+    }
+}
